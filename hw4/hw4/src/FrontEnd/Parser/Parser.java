@@ -3,6 +3,8 @@ package FrontEnd.Parser;
 import FrontEnd.Lexer.Token;
 import FrontEnd.Lexer.TokenStream;
 import FrontEnd.Lexer.TokenType;
+import FrontEnd.Visitor.*;
+import tools.Printer;
 
 import java.util.ArrayList;
 import java.util.Objects;
@@ -10,9 +12,29 @@ import java.util.Objects;
 public class Parser {
     private TokenStream tokenStream;
     private Token curToken;
+    private Printer printer;
+    private TableStack tableStack;
+    //最近定义/调用的一个函数的参数数量与参数维数
+    int paramNum;
+    ArrayList<Integer> paramDims;
+    //错误g的检查开关 是否是函数的block
+    Boolean funcReturnCheck;
+    //针对printf语句
+    int formatNum;
+    int ExpNum;
+    //当前是否在解析for块
+    Boolean forFlag;
     
-    public Parser(TokenStream tokenStream) {
+    public Parser(TokenStream tokenStream,Printer printer,TableStack tableStack) {
         this.tokenStream = tokenStream;
+        this.printer = printer;
+        this.tableStack = tableStack;
+        paramNum = 0;
+        paramDims = new ArrayList<>();
+        funcReturnCheck = false;
+        formatNum = 0;
+        ExpNum = 0;
+        forFlag = false;
         peek();
     }
     
@@ -22,9 +44,133 @@ public class Parser {
         tokenStream.read();
         curToken = tokenStream.peek();
     }
+    
     //返回当前token
     private void peek() {
         curToken = tokenStream.peek();
+    }
+    
+    //check and read ';'
+    private void checkAndReadSemicn(ArrayList<Node> children) {
+        if (curToken.getType() == TokenType.SEMICN) {
+            TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
+            read();
+        } else {
+            ErrorMessage errorMessage = new ErrorMessage(tokenStream.watch(-1).getLine(), ErrorType.i);
+            printer.addErrorMessage(errorMessage);
+        }
+    }
+    
+    //check and read ')'
+    private void checkAndReadRparent(ArrayList<Node> children) {
+        if (curToken.getType() == TokenType.RPARENT) {
+            TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
+            read();
+        } else {
+            ErrorMessage errorMessage = new ErrorMessage(tokenStream.watch(-1).getLine(), ErrorType.j);
+            printer.addErrorMessage(errorMessage);
+        }
+    }
+    
+    //check and read ']'
+    private void checkAndReadRbrack(ArrayList<Node> children) {
+        if (curToken.getType() == TokenType.RBRACK) {
+            TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
+            read();
+        } else {
+            ErrorMessage errorMessage = new ErrorMessage(tokenStream.watch(-1).getLine(), ErrorType.k);
+            printer.addErrorMessage(errorMessage);
+        }
+    }
+    
+    private void checkFuncRParam(Node node) {
+        //Exp -> AddExp -> MulExp -> UnaryExp -> PrimaryExp -> LVal -> Ident{'['Exp']'}
+        //UnaryExp -> Ident '(' [FuncRParams] ')'
+        //UnaryExp → PrimaryExp | Ident '(' [FuncRParams] ')' | UnaryOp UnaryExp
+        //PrimaryExp → '(' Exp ')' | LVal | Number
+        int flag1 = 1;//1 LVal
+        int flag2 = 1;//1 Ident()
+        int i;
+        Node tempNode1 = node;
+        Node tempNode2 = node;
+        //如果是第二种情况一定会在i = 3 时break
+        for (i = 0; i < 5; i++) {
+            if (tempNode1.getChildren().size() != 1) {
+                flag1 = 0;
+                break;
+            }
+            tempNode1 = tempNode1.getChildren().get(0);
+            //primaryExp -> number
+            if (i == 4 && tempNode1.getSyntaxType() == SyntaxType.NUMBER) {
+                flag1 = 0;
+                break;
+            }
+        }
+        for (i = 0; i < 3;i++) {
+            if (tempNode2.getChildren().size() != 1) {
+                flag2 = 0;
+                break;
+            }
+            tempNode2 = tempNode2.getChildren().get(0);
+        }
+        if(tempNode2.getChildren().size() > 1 && tempNode2.getChildren().get(1) instanceof TokenNode && flag2 == 1) {
+            if (((TokenNode)tempNode2.getChildren().get(1)).getToken().getType() == TokenType.LPARENT
+            && ((TokenNode)tempNode2.getChildren().get(0)).getToken().getType() == TokenType.IDENFR) {
+                flag2 = 1;
+            } else {
+                flag2 = 0;
+            }
+        } else {
+            flag2 = 0;
+        }
+        
+        //tempNode is LVal && c 类错误会在parseLVal中判定(没有c类错误才开始check e)
+        if (flag1 == 1) {
+            String name = ((TokenNode)tempNode1.getChildren().get(0)).getToken().getContent();
+            //没有c类错误
+            if (tableStack.checkSymbol(name)) {
+                Symbol tableSymbol = tableStack.getSymbol(name);
+                int tableDim;
+                if (tableSymbol instanceof VarSymbol) {
+                    tableDim = ((VarSymbol)tableSymbol).getDim();
+                } else {
+                    tableDim = ((ConstSymbol) tableSymbol).getDim();
+                }
+                //数LVal中有几个'['']'
+                int brackNum = 0;
+                for (i = 0; i < tempNode1.getChildren().size(); i++) {
+                    if (tempNode1.getChildren().get(i) instanceof TokenNode) {
+                        if (Objects.equals(((TokenNode) tempNode1.getChildren().get(i)).getToken().getContent(), "[")) {
+                            brackNum++;
+                        }
+                    }
+                }
+                int curDim = tableDim - brackNum;
+                paramDims.add(curDim);
+            }
+        }
+        //tempNode is UnaryExp
+        else if (flag2 == 1) {
+            String name = ((TokenNode)tempNode2.getChildren().get(0)).getToken().getContent();
+            //没有c类错误
+            if (tableStack.checkSymbol(name)) {
+                Symbol tableSymbol = tableStack.getSymbol(name);
+                int curDim;
+                String returnType = ((FuncSymbol)tableSymbol).getReturnType();
+                if (Objects.equals(returnType, "void")) {
+                    curDim = Integer.MIN_VALUE;
+                } else {
+                    curDim = 0;
+                }
+                paramDims.add(curDim);
+            }
+        }
+        else {
+            paramDims.add(0);
+        }
     }
     
     //默认读取到当前node的第一个token
@@ -34,6 +180,7 @@ public class Parser {
     public Node parseCompUnit() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        tableStack.enterBlock();
         while(curToken != null) {
             Node node = null;
             //保证顺序（此处适用于分析顺序正确的程序）
@@ -60,6 +207,7 @@ public class Parser {
             children.add(node);
         }
         int endLine = tokenStream.watch(-1).getLine();
+        tableStack.leaveBlock();
         return new Node(startLine,endLine,SyntaxType.COMP_UNIT,children);
     }
     
@@ -68,20 +216,19 @@ public class Parser {
     public Node parseConstDecl() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
-        //parse const
-        TokenNode constNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
-        children.add(constNode);
-        read();
-        //curToken = 'int' parse int
-        TokenNode intNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
-        children.add(intNode);
-        read();
+        int i;
+        //'const' 'int'
+        for (i = 0; i < 2; i++) {
+            TokenNode tokenNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
+            read();
+        }
         //curToken -> ConstDecl
         Node node = parseConstDef();
         children.add(node);
         //curToken = ',' or ';'
-        while (curToken.getType() != TokenType.SEMICN) {
-            //parse comma
+        while (curToken.getType() == TokenType.COMMA) {
+            //parse ','
             TokenNode commaNode = new TokenNode(curToken.getLine(), curToken.getLine(), SyntaxType.TOKEN,null,curToken);
             children.add(commaNode);
             read();
@@ -90,9 +237,7 @@ public class Parser {
             children.add(node);
         }
         //parse semicn
-        TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-        children.add(semicnNode);
-        read();
+        checkAndReadSemicn(children);
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.CONST_DECL,children);
     }
@@ -109,7 +254,7 @@ public class Parser {
         Node node = parseVarDef();
         children.add(node);
         //curToken = ',' or ';'
-        while(curToken.getType() != TokenType.SEMICN) {
+        while(curToken.getType() == TokenType.COMMA) {
             //parse comma
             TokenNode commaNode = new TokenNode(curToken.getLine(), curToken.getLine(), SyntaxType.TOKEN,null,curToken);
             children.add(commaNode);
@@ -119,9 +264,7 @@ public class Parser {
             children.add(node);
         }
         //parse semicn
-        TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-        children.add(semicnNode);
-        read();
+        checkAndReadSemicn(children);
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(starLine,endLine,SyntaxType.VAR_DECL,children);
     }
@@ -130,13 +273,16 @@ public class Parser {
     public Node parseConstDef() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        int dim = 0;
         //parse ident
         TokenNode identNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
+        String name = curToken.getContent();
         children.add(identNode);
         read();
         //curToken = '['
-        //parse [ConstExp]
+        //parse '[' ConstExp ']'
         while (curToken.getType() == TokenType.LBRACK) {
+            dim++;
             //parse '['
             TokenNode lbrackNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(lbrackNode);
@@ -145,9 +291,7 @@ public class Parser {
             Node node = parseConstExp();
             children.add(node);
             //parse ']'
-            TokenNode rbrackNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(rbrackNode);
-            read();
+            checkAndReadRbrack(children);
         }
         //parse '='
         TokenNode assignNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
@@ -156,6 +300,15 @@ public class Parser {
         //parse ConstInitVal
         Node node = parseConstInitVal();
         children.add(node);
+        //check error
+        ConstSymbol symbol = new ConstSymbol(name,SymbolType.con,dim);
+        SymbolTable curTable = tableStack.peek();
+        if (curTable.check(name)) {
+            ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.b);
+            printer.addErrorMessage(errorMessage);
+        } else {
+            curTable.addSymbol(symbol);
+        }
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.CONST_DEF,children);
     }
@@ -164,13 +317,16 @@ public class Parser {
     public Node parseVarDef() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        int dim = 0;
         //parse ident
         TokenNode identNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
         children.add(identNode);
+        String name = curToken.getContent();
         read();
         //curToken = '['
         //parse '[' ConstExp ']'
         while (curToken.getType() == TokenType.LBRACK) {
+            dim++;
             //parse '['
             TokenNode lbrackNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(lbrackNode);
@@ -179,9 +335,7 @@ public class Parser {
             Node node = parseConstExp();
             children.add(node);
             //parse ']'
-            TokenNode rbrackNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(rbrackNode);
-            read();
+            checkAndReadRbrack(children);
         }
         if (curToken.getType() == TokenType.ASSIGN) {
             //parse '='
@@ -191,6 +345,15 @@ public class Parser {
             //parse initVal
             Node node = parseInitVal();
             children.add(node);
+        }
+        //check error
+        VarSymbol symbol = new VarSymbol(name,SymbolType.var,dim);
+        SymbolTable curTable = tableStack.peek();
+        if (curTable.check(name)) {
+            ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.b);
+            printer.addErrorMessage(errorMessage);
+        } else {
+            curTable.addSymbol(symbol);
         }
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.VAR_DEF,children);
@@ -203,26 +366,47 @@ public class Parser {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
         //parse FuncType
+        String returnType = curToken.getContent();//'void' or 'int'
         Node node = parseFuncType();
         children.add(node);
-        //parse ident
-        TokenNode identNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-        children.add(identNode);
-        read();
-        //parse '('
-        TokenNode lparentNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-        children.add(lparentNode);
-        read();
-        if (curToken.getType() != TokenType.RPARENT) {
+        //parse ident '('
+        int i;
+        String name = curToken.getContent();
+        SymbolTable oldTable = tableStack.peek();
+        int identLine = curToken.getLine();
+        paramNum = 0;
+        paramDims = new ArrayList<>();
+        for (i = 0; i < 2; i++) {
+            TokenNode identNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(identNode);
+            read();
+        }
+        //建立新的符号表
+        tableStack.enterBlock();
+        //FuncFParams -> FuncParam,FuncParam...
+        //FuncParam -> BType Ident... -> 'int' Ident...
+        if (curToken.getType() == TokenType.INTTK) {
             node = parseFuncFParams();
             children.add(node);
         }
         //parse ')'
-        TokenNode rparentNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-        children.add(rparentNode);
-        read();
-        //parse block
+        checkAndReadRparent(children);
+        //check func error b
+        FuncSymbol symbol = new FuncSymbol(name,SymbolType.func,returnType,paramNum,paramDims);
+        tableStack.setCurFunc(symbol);
+        //oldTable中找函数是否重定义
+        if (oldTable.check(name)) {
+            ErrorMessage errorMessage = new ErrorMessage(identLine,ErrorType.b);
+            printer.addErrorMessage(errorMessage);
+        } else {
+            oldTable.addSymbol(symbol);
+        }
+        //parse block 可以returnTypeCheck
+        funcReturnCheck = true;
         node = parseBlock();
+        funcReturnCheck = false;
+        //解析完函数定义
+        tableStack.leaveBlock();
         children.add(node);
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.FUNC_DEF,children);
@@ -232,6 +416,10 @@ public class Parser {
     public Node parseMainFuncDef() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        //进入
+        tableStack.enterBlock();
+        FuncSymbol symbol = new FuncSymbol("main",SymbolType.func,"int",0,new ArrayList<>());
+        tableStack.setCurFunc(symbol);
         //parse int
         TokenNode intNode = new TokenNode(startLine,startLine,SyntaxType.TOKEN,null,curToken);
         children.add(intNode);
@@ -248,10 +436,14 @@ public class Parser {
         TokenNode rparentNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
         children.add(rparentNode);
         read();
-        //parse Block
+        //parse Block 可以 returnTypeCheck
+        funcReturnCheck = true;
         Node node = parseBlock();
+        funcReturnCheck = false;
         children.add(node);
         int endLine = tokenStream.watch(-1).getLine();
+        //离开
+        tableStack.leaveBlock();
         return new Node(startLine,endLine,SyntaxType.MAIN_FUNC_DEF,children);
     }
     
@@ -351,22 +543,62 @@ public class Parser {
         //parse ident ([FuncRParams])
         if (curToken.getType() == TokenType.IDENFR && tokenStream.watch(1).getType() == TokenType.LPARENT) {
             //parse ident
-            TokenNode identNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(identNode);
+            TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            String name = curToken.getContent();
+            children.add(tokenNode);
             read();
+            //check error c (not defined func)
+            if (!tableStack.checkSymbol(name)) {
+                ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.c);
+                printer.addErrorMessage(errorMessage);
+            }
             //parse '('
-            TokenNode lparentNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(lparentNode);
+            tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
             read();
-            //parse FuncRParams
-            if (curToken.getType() != TokenType.RPARENT) {
+            //ident '('    FuncRParams
+            //FuncRParams -> Exp,Exp...
+            //FIRST(Exp) = {'(',ident,intConst,'+','-'}
+            if (curToken.getType() == TokenType.LPARENT || curToken.getType() == TokenType.IDENFR
+            || curToken.getType() == TokenType.INTCON || curToken.getType() == TokenType.PLUS
+            || curToken.getType() == TokenType.MINU) {
+                //FuncRParams
+                paramNum = 0;
+                paramDims = new ArrayList<>();
                 Node node = parseFuncRParams();
                 children.add(node);
+                //check error (d) 没有c错误才能check d
+                //SymbolTable curTable = tableStack.peek();
+                if (tableStack.checkFuncSymbol(name)) {
+                    //Symbol tableSymbol = curTable.getSymbol(name);
+                    Symbol tableSymbol = tableStack.getSymbol(name);
+                    int tableParamNum = ((FuncSymbol)tableSymbol).getParamNum();
+                    if (tableParamNum != paramNum) {
+                        ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.d);
+                        printer.addErrorMessage(errorMessage);
+                    }
+                    //没有 d 才能 check e
+                    else {
+                        //check error (e)
+                        ArrayList<Integer> tableDims = ((FuncSymbol)tableSymbol).getParamDims();
+                        if (tableDims.size() != paramDims.size()) {
+                            ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.e);
+                            printer.addErrorMessage(errorMessage);
+                        } else {
+                            int j;
+                            for (j = 0; j < tableDims.size(); j++) {
+                                if (tableDims.get(j) != paramDims.get(j)) {
+                                    ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.e);
+                                    printer.addErrorMessage(errorMessage);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            //parse ')'
-            TokenNode rparentNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(rparentNode);
-            read();
+            //')'
+            checkAndReadRparent(children);
         }
         //parse UnaryOp UnaryExp
         else if (curToken.getType() == TokenType.PLUS || curToken.getType() == TokenType.MINU || curToken.getType() == TokenType.NOT) {
@@ -494,9 +726,19 @@ public class Parser {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
         //block
+        //这种block是不必进行returnType检查的(g)
+        //但是要新建符号表！！！
         if (curToken.getType() == TokenType.LBRACE) {
+            boolean temp = funcReturnCheck;
+            funcReturnCheck = false;
+            //新建符号表
+            tableStack.enterBlock();
             Node node = parseBlock();
             children.add(node);
+            //离开block
+            tableStack.leaveBlock();
+            //恢复原先权限
+            funcReturnCheck = temp;
         }
         //if
         //| 'if' '(' Cond ')' Stmt [ 'else' Stmt ] // 1.有else 2.无else
@@ -513,9 +755,7 @@ public class Parser {
             Node node = parseCond();
             children.add(node);
             //')'
-            TokenNode rparentNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(rparentNode);
-            read();
+            checkAndReadRparent(children);
             //stmt
             node = parseStmt();
             children.add(node);
@@ -532,82 +772,104 @@ public class Parser {
         //for
         //| 'for' '(' [ForStmt] ';' [Cond] ';' [ForStmt] ')' Stmt // 1. 无缺省 2. 缺省第一个ForStmt 3. 缺省Cond 4. 缺省第二个ForStmt
         else if (curToken.getType() == TokenType.FORTK) {
-            //for
-            TokenNode forNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(forNode);
-            read();
-            //'('
-            TokenNode lparentNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(lparentNode);
-            read();
+            //当前处于for循环
+            forFlag = true;
+            //'for' '('
+            int i;
+            for (i = 0; i < 2; i++) {
+                TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+                children.add(tokenNode);
+                read();
+            }
             if (curToken.getType() != TokenType.SEMICN) {
                 Node node = parseForStmt();
                 children.add(node);
             }
             //';'
-            TokenNode semicnNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(semicnNode);
-            read();
+            checkAndReadSemicn(children);
+            //Cond
             if (curToken.getType() != TokenType.SEMICN) {
                 Node node = parseCond();
                 children.add(node);
             }
             //';'
-            TokenNode semicnNode1 = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(semicnNode1);
-            read();
+            checkAndReadSemicn(children);
+            //ForStmt
             if (curToken.getType() != TokenType.RPARENT) {
                 Node node = parseForStmt();
                 children.add(node);
             }
             //')'
-            TokenNode rparentNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(rparentNode);
-            read();
+            checkAndReadRparent(children);
             //stmt
             Node node = parseStmt();
             children.add(node);
+            //退出for循环
+            forFlag = false;
         }
         //| 'break' ';' | 'continue' ';'
         else if (curToken.getType() == TokenType.BREAKTK) {
+            if (!forFlag) {
+                ErrorMessage errorMessage = new ErrorMessage(curToken.getLine(),ErrorType.m);
+                printer.addErrorMessage(errorMessage);
+            }
             TokenNode breakNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(breakNode);
             read();
             //parse ';'
-            TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(semicnNode);
-            read();
+            checkAndReadSemicn(children);
         } else if (curToken.getType() == TokenType.CONTINUETK) {
+            if (!forFlag) {
+                ErrorMessage errorMessage = new ErrorMessage(curToken.getLine(),ErrorType.m);
+                printer.addErrorMessage(errorMessage);
+            }
             TokenNode continueNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(continueNode);
             read();
             //parse ';'
-            TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(semicnNode);
-            read();
+            checkAndReadSemicn(children);
         }
         //| 'return' [Exp] ';' // 1.有Exp 2.无Exp
         else if (curToken.getType() == TokenType.RETURNTK) {
+            String returnType = tableStack.getCurFunc().getReturnType();
             //return
             TokenNode returnNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(returnNode);
+            int returnLine = curToken.getLine();
             read();
             if (curToken.getType() != TokenType.SEMICN) {
+                //<Exp>
                 Node node = parseExp();
                 children.add(node);
+                //check error
+                if (returnType.equals("void")) {
+                    ErrorMessage errorMessage = new ErrorMessage(returnLine,ErrorType.f);
+                    printer.addErrorMessage(errorMessage);
+                }
             }
-            TokenNode semicnNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(semicnNode);
-            read();
+            checkAndReadSemicn(children);
         }
         //| 'printf' '(' FormatString { ',' Exp} ')' ';' // 1.有Exp 2.无Exp
         else if (curToken.getType() == TokenType.PRINTFTK) {
+            //FormatString已经在lexer完成错误处理
+            //<FormatString> -> ' " ' {<Char>} ' " '
+            //<Char> -> <FormatChar> | <NormalChar>
+            //<FormatChar> -> %d
+            //<NormalChar> → 十进制编码为32,33,40-126的ASCII字符，'\'（编码92）出现当且仅当为'\n'
             //'printf' '(' FormatString
+            int printLine = curToken.getLine();
             for (int i = 0; i < 3; i++) {
                 TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
                 children.add(tokenNode);
+                // FormatString
+                if (i == 2) {
+                    String formatString = curToken.getContent();
+                    String[] strings = formatString.split("%d");
+                    formatNum = strings.length - 1;
+                }
                 read();
             }
+            ExpNum = 0;
             while (curToken.getType() == TokenType.COMMA) {
                 //','
                 TokenNode printfNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
@@ -616,65 +878,81 @@ public class Parser {
                 //Exp
                 Node node = parseExp();
                 children.add(node);
+                ExpNum++;
             }
-            //')' ';'
-            for (int i = 0; i < 2; i++) {
-                TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-                children.add(tokenNode);
-                read();
+            //check error l
+            if (formatNum != ExpNum) {
+                ErrorMessage errorMessage = new ErrorMessage(printLine,ErrorType.l);
+                printer.addErrorMessage(errorMessage);
             }
+            //')'
+            checkAndReadRparent(children);
+            //';'
+            checkAndReadSemicn(children);
         }
         //LVal '=' Exp ';'
         //LVal '=' 'getint''('')'';'
         //| [Exp] ';' //有无Exp两种情况
         else {
-            int assignFlag = 0;
-            int i = 0;
-            Token token = tokenStream.watch(i);
-            while (token.getType() != TokenType.SEMICN) {
-                if (token.getType() == TokenType.ASSIGN) {
-                    assignFlag = 1;
-                    break;
-                }
-                i++;
-                token = tokenStream.watch(i);
-            }
-            if (assignFlag == 1) {
-                //LVal
-                Node node = parseLVal();
-                children.add(node);
-                //'='
+            // ';'
+            if (curToken.getType() == TokenType.SEMICN) {
+                //';'
                 TokenNode tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
                 children.add(tokenNode);
                 read();
-                //parse 'getint' '(' ')'
-                if (curToken.getType() == TokenType.GETINTTK) {
-                    //'getint' '(' ')'
-                    for (i = 0; i < 3; i++) {
-                        tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-                        children.add(tokenNode);
-                        read();
+            } else {
+                //LVal or Exp
+                Node temp = parseExp();
+                //Exp   ';'
+                if (curToken.getType() == TokenType.SEMICN) {
+                    children.add(temp);
+                    //';'
+                    TokenNode tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(), SyntaxType.TOKEN, null,curToken);
+                    children.add(tokenNode);
+                    read();
+                }
+                //LVal   '=' Exp ';'
+                //LVal   '=' 'getint''('')'';'
+                else if (curToken.getType() == TokenType.ASSIGN) {
+                    //Exp -> AddExp -> MulExp -> UnaryExp -> PrimaryExp -> LVal
+                    Node node = temp.getChildren().get(0).getChildren().get(0).getChildren().get(0)
+                            .getChildren().get(0).getChildren().get(0);
+                    children.add(node);
+                    int i;
+                    //check error h
+                    String name = ((TokenNode)node.getChildren().get(0)).getToken().getContent();
+                    Symbol tableSymbol = tableStack.getSymbol(name);
+                    if (tableSymbol instanceof ConstSymbol) {
+                        ErrorMessage errorMessage = new ErrorMessage(tokenStream.watch(-1).getLine(),ErrorType.h);
+                        printer.addErrorMessage(errorMessage);
                     }
-                } else {
-                    //parse Exp
-                    node = parseExp();
-                    children.add(node);
+                    //'='
+                    TokenNode tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+                    children.add(tokenNode);
+                    read();
+                    //parse 'getint' '(' ')'
+                    if (curToken.getType() == TokenType.GETINTTK) {
+                        //'getint' '('
+                        for (i = 0; i < 2; i++) {
+                            tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+                            children.add(tokenNode);
+                            read();
+                        }
+                        //')'
+                        checkAndReadRparent(children);
+                    } else {
+                        //parse Exp
+                        node = parseExp();
+                        children.add(node);
+                    }
+                    //parse ';'
+                    checkAndReadSemicn(children);
                 }
-                //parse ';'
-                TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-                children.add(semicnNode);
-                read();
-            }
-            //| [Exp] ';' //有无Exp两种情况
-            else {
-                if (curToken.getType() != TokenType.SEMICN) {
-                    Node node = parseExp();
-                    children.add(node);
+                //Exp 缺少';'
+                else {
+                    ErrorMessage errorMessage = new ErrorMessage(tokenStream.watch(-1).getLine(),ErrorType.i);
+                    printer.addErrorMessage(errorMessage);
                 }
-                //parse ';'
-                TokenNode semicnNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-                children.add(semicnNode);
-                read();
             }
         }
         int endLine = tokenStream.watch(-1).getLine();
@@ -716,6 +994,7 @@ public class Parser {
         //ident
         TokenNode tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,children,curToken);
         children.add(tokenNode);
+        String name = curToken.getContent();
         read();
         //'[' Exp ']'
         while (curToken.getType() == TokenType.LBRACK) {
@@ -727,9 +1006,12 @@ public class Parser {
             Node node = parseExp();
             children.add(node);
             //']'
-            tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(tokenNode);
-            read();
+            checkAndReadRbrack(children);
+        }
+        //check error (not defined)
+        if (!tableStack.checkSymbol(name)) {
+            ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.c);
+            printer.addErrorMessage(errorMessage);
         }
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.LVAL,children);
@@ -762,16 +1044,33 @@ public class Parser {
     public Node parseFuncRParams() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        int temp = paramNum;
+        ArrayList<Integer> tempDims = paramDims;
+        paramNum = 0;
+        paramDims = new ArrayList<>();
         Node node = parseExp();
+        paramNum = temp;
+        paramDims = tempDims;
+        paramNum++;
         children.add(node);
+        checkFuncRParam(node);
         //',' Exp
         while (curToken.getType() == TokenType.COMMA) {
+            //','
             TokenNode tokenNode = new TokenNode(curToken.getLine(), curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(tokenNode);
             read();
             //Exp
+            temp = paramNum;
+            tempDims = paramDims;
+            paramNum = 0;
+            paramDims = new ArrayList<>();
             node = parseExp();
+            paramNum = temp;
+            paramDims = tempDims;
+            paramNum++;
             children.add(node);
+            checkFuncRParam(node);
         }
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.FUNCR_PARAMS,children);
@@ -782,6 +1081,7 @@ public class Parser {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
         Node node = parseFuncFParam();
+        paramNum++;
         children.add(node);
         while (curToken.getType() == TokenType.COMMA) {
             //','
@@ -790,6 +1090,7 @@ public class Parser {
             read();
             //FuncFParam
             node = parseFuncFParam();
+            paramNum++;
             children.add(node);
         }
         int endLine = tokenStream.watch(-1).getLine();
@@ -800,21 +1101,29 @@ public class Parser {
     public Node parseFuncFParam() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        int dim = 0;
+        String name = null;
         //BTyte Ident
         for (int i = 0; i < 2; i++) {
             TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(tokenNode);
+            if (i == 1) {
+                name = curToken.getContent();
+            }
             read();
         }
         //'[' ']'
         if (curToken.getType() == TokenType.LBRACK) {
-            for (int i = 0; i < 2; i++) {
-                TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-                children.add(tokenNode);
-                read();
-            }
+            dim++;
+            //'['
+            TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
+            children.add(tokenNode);
+            read();
+            //']'
+            checkAndReadRbrack(children);
         }
         while (curToken.getType() == TokenType.LBRACK) {
+            dim++;
             //'['
             TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
             children.add(tokenNode);
@@ -823,9 +1132,17 @@ public class Parser {
             Node node = parseConstExp();
             children.add(node);
             //']'
-            tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
-            children.add(tokenNode);
-            read();
+            checkAndReadRbrack(children);
+        }
+        paramDims.add(dim);
+        //check error
+        VarSymbol symbol = new VarSymbol(name,SymbolType.var,dim);
+        SymbolTable curTable = tableStack.peek();
+        if (curTable.check(name)) {
+            ErrorMessage errorMessage = new ErrorMessage(startLine,ErrorType.b);
+            printer.addErrorMessage(errorMessage);
+        } else {
+            curTable.addSymbol(symbol);
         }
         int endLine = tokenStream.watch(-1).getLine();
         return new Node(startLine,endLine,SyntaxType.FUNCF_PARAM,children);
@@ -924,6 +1241,7 @@ public class Parser {
     public Node parseBlock() {
         int startLine = curToken.getLine();
         ArrayList<Node> children = new ArrayList<>();
+        int returnFlag = 0;
         //'{'
         TokenNode tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);
         children.add(tokenNode);
@@ -942,9 +1260,18 @@ public class Parser {
             }
             //Stmt
             else {
+                if (curToken.getType() == TokenType.RETURNTK) {
+                    returnFlag = 1;
+                }
                 Node node = parseStmt();
                 children.add(node);
             }
+        }
+        //check error g
+        String returnType = tableStack.getCurFunc().getReturnType();
+        if (Objects.equals(returnType, "int") && returnFlag == 0 && funcReturnCheck) {
+            ErrorMessage errorMessage = new ErrorMessage(curToken.getLine(),ErrorType.g);
+            printer.addErrorMessage(errorMessage);
         }
         //'}'
         tokenNode = new TokenNode(curToken.getLine(),curToken.getLine(),SyntaxType.TOKEN,null,curToken);

@@ -32,7 +32,7 @@ public class Compiler {
         if (node instanceof TokenNode) {
             System.out.println(((TokenNode) node).getToken().getType() + " " + ((TokenNode) node).getToken().getContent());
         } else {
-            //后续遍历
+            //后序遍历
             for (int i = 0; i < node.getChildren().size(); i++) {
                 visitNode(node.getChildren().get(i));
             }

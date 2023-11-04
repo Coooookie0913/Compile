@@ -1,0 +1,26 @@
+1.语法错误
+printer.addError()
+2.语义错误
+2.1建符号表
+Symbol：name Type(func,var,const) 
+varSymbol:value dim1 dim2（最多几维数组？）
+funcSymbol:returnType paramNum(参数数量) paramTable<String,Token>
+constSymbol:value
+
+（栈式符号表）
+SymbolTable：
+HashMap<String,Symbol>
+TableStack:
+Stack<SymbolTable>
+depth
+cur
+2.2查表
+声明类：先查当前栈顶符号表，若无，则Table.add()；若有，则printer.addError()
+引用类：先查当前栈顶符号表，若无则一直递归查找，直到找到，否则printer.addError()
+Exp添加calculate()方法 计算值
+2.3删除表
+退出当前block，stack.pop()
+
+0 存储全局变量
+
+Exp -> AddExp -> MulExp -> UnaryExp -> PrimaryExp -> LVal -> Ident{'['Exp']'}
