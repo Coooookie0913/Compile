@@ -1,0 +1,10 @@
+// 测试d类错误 函数参数个数不匹配
+int func2(int a, int b) {
+	return a+b;
+}
+
+int main() {
+    int a;
+	a = func2();		// 8
+	return 0;
+}

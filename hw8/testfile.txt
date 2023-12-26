@@ -1,0 +1,12 @@
+const integer const1 = 1, const2 = -100;
+integer change1;
+integer gets1(integer var1,integer var2){
+   const1 = 999;
+   change1 = var1 + var2
+   return (change1);
+}
+integer main(){
+   change1 = 10;
+   printf("Hello World$");
+   return 0;
+}
